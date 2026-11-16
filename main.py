@@ -8,6 +8,7 @@ import json
 import base64
 import socket
 import threading
+import time
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 
@@ -286,6 +287,8 @@ class JarvisApp(App):
         self.welcome = None
         self._sheet = None
         self._pinging = False
+        self._gen_started = 0.0
+        self._first_chunk_at = None
         self.stop_event = threading.Event()
         self._latest = (None, "")
         self._flush = Clock.create_trigger(self._do_flush)
@@ -618,6 +621,11 @@ class JarvisApp(App):
 
     def on_send_pressed(self, *a):
         if self.generating:
+            now = time.time()
+            first = self._first_chunk_at
+            # Игнорируем случайные касания сразу после отправки и после первого куска ответа
+            if now - self._gen_started < 2.0 or (first is not None and now - first < 2.0):
+                return
             self.stop_event.set()
             return
         self.submit()
@@ -644,6 +652,9 @@ class JarvisApp(App):
         self._add_message("user", shown)
         bubble = self._add_message("assistant", "Думаю…", "muted")
 
+        self.stop_event.clear()
+        self._first_chunk_at = None
+        self._gen_started = time.time()
         self.generating = True
         self.refresh_send()
         threading.Thread(target=self._worker, args=(text, image_path, bubble), daemon=True).start()
@@ -708,7 +719,6 @@ class JarvisApp(App):
             if image_path:
                 with open(image_path, "rb") as f:
                     payload["image"] = base64.b64encode(f.read()).decode("ascii")
-            self.stop_event.clear()
             resp = self._request("/chat", payload, timeout=120)
             for raw in resp:
                 if self.stop_event.is_set():
@@ -720,6 +730,8 @@ class JarvisApp(App):
                 if "error" in obj:
                     raise RuntimeError(obj["error"])
                 if "t" in obj:
+                    if self._first_chunk_at is None:
+                        self._first_chunk_at = time.time()
                     reply += obj["t"]
                     self._latest = (bubble, reply)
                     self._flush()
@@ -734,10 +746,11 @@ class JarvisApp(App):
                 error = "Фото слишком большое."
             else:
                 error = f"Ошибка сервера ({e.code})."
-        except (socket.timeout, OSError):
-            error = "Нет связи с ПК. Проверь Wi-Fi, адрес и что jarvis_server.py запущен."
+        except (socket.timeout, OSError) as e:
+            error = (f"Нет связи с ПК ({type(e).__name__}). "
+                     "Проверь Wi-Fi, адрес и что jarvis_server.py запущен.")
         except Exception as e:
-            error = str(e)
+            error = f"{type(e).__name__}: {e}"
         finally:
             if resp is not None:
                 try:
@@ -753,7 +766,10 @@ class JarvisApp(App):
             self.history.append({"role": "user", "content": user_hist})
             self.history.append({"role": "assistant", "content": reply})
             self.history = self.history[-MAX_HISTORY_MESSAGES:]
-        Clock.schedule_once(lambda dt: self._finish(bubble, reply, error), 0)
+        shown = reply
+        if self.stop_event.is_set() and not error:
+            shown = (reply + "\n\n" if reply else "") + "[остановлено]"
+        Clock.schedule_once(lambda dt: self._finish(bubble, shown, error), 0)
 
     def _finish(self, bubble, reply, error):
         if error:
