@@ -6,7 +6,9 @@ Jarvis — ПРИЛОЖЕНИЕ ДЛЯ ТЕЛЕФОНА (Android, сборка �
 import os
 import json
 import base64
+import re
 import socket
+import ssl
 import threading
 import time
 from urllib.request import Request, urlopen
@@ -347,16 +349,18 @@ class JarvisApp(App):
             print("save cfg:", e)
 
     def base_url(self):
-        host = self.cfg.get("host", "").strip()
-        for p in ("http://", "https://"):
-            if host.lower().startswith(p):
-                host = host[len(p):]
-        host = host.strip().strip("/")
+        """IP:порт -> http (домашняя сеть), любое имя/ссылка -> https (интернет)."""
+        host = self.cfg.get("host", "").strip().strip("/")
         if not host:
             return None
-        if ":" not in host:
-            host += f":{DEFAULT_PORT}"
-        return "http://" + host
+        low = host.lower()
+        if low.startswith(("http://", "https://")):
+            return host
+        if re.match(r"^[\d.]+(:\d+)?$", host) or low.startswith("localhost"):
+            if ":" not in host:
+                host += f":{DEFAULT_PORT}"
+            return "http://" + host
+        return "https://" + host
 
     def _make_sheet(self, size_hint, height=None):
         sheet = ModalView(size_hint=size_hint, auto_dismiss=True, background="",
@@ -398,7 +402,7 @@ class JarvisApp(App):
                       size_hint_y=None, height=dp(34), halign="left", valign="middle")
         bind_wrap(title)
         box.add_widget(title)
-        box.add_widget(self._small_label("Адрес ПК (его покажет сервер), например 192.168.0.10:8765"))
+        box.add_widget(self._small_label("Адрес ПК (IP:порт или https-ссылка)"))
         host = TextInput(text=self.cfg.get("host", ""), hint_text="192.168.0.10:8765",
                          **self._field_style())
         box.add_widget(host)
@@ -669,7 +673,15 @@ class JarvisApp(App):
                           headers=headers, method="POST")
         else:
             req = Request(url, headers=headers)
-        return urlopen(req, timeout=timeout)
+        ctx = self._ssl_context() if url.startswith("https://") else None
+        return urlopen(req, timeout=timeout, context=ctx)
+
+    def _ssl_context(self):
+        try:
+            import certifi                    # на Android нужен свой набор сертификатов
+            return ssl.create_default_context(cafile=certifi.where())
+        except Exception:
+            return ssl.create_default_context()
 
     def _set_status(self, text, color):
         def _do(dt):
